@@ -325,100 +325,249 @@ if page == "1. 유튜브 크롤링":
 
 elif page == "2. Gemini 딕셔너리 랭킹":
     st.title("🧠 Gemini 딕셔너리 기반 인기 상품 랭킹")
-    candidate_file = st.file_uploader("YT_candidate_df.csv 업로드", type=["csv"], key="cand")
-    raw_file = st.file_uploader("YT_video_raw.csv 업로드", type=["csv"], key="raw")
-    min_count = st.number_input("Gemini 분류 최소 빈도", 1, 100, 5)
-    max_keywords = st.slider("Gemini 분류 키워드 수", 50, 1000, 300, 50)
-    if candidate_file:
-        candidate_df = pd.read_csv(candidate_file)
+    st.caption("1페이지에서 크롤링한 candidate_df와 raw 영상 데이터를 자동으로 불러옵니다. 필요할 때만 CSV를 직접 업로드하세요.")
+
+    # --------------------------------------------------
+    # 1) 1페이지 결과 자동 불러오기 + 수동 업로드 fallback
+    # --------------------------------------------------
+    candidate_df = st.session_state.get("candidate_df", None)
+    video_df = st.session_state.get("video_df", None)
+
+    col_auto1, col_auto2 = st.columns(2)
+    with col_auto1:
+        if candidate_df is not None:
+            st.success(f"candidate_df 자동 불러오기 완료: {len(candidate_df):,}행")
+        else:
+            st.warning("자동으로 불러올 candidate_df가 없습니다. CSV를 직접 업로드하세요.")
+            candidate_file = st.file_uploader("candidate_df CSV 업로드", type=["csv"], key="cand_manual")
+            if candidate_file is not None:
+                candidate_df = pd.read_csv(candidate_file)
+                st.session_state.candidate_df = candidate_df
+                st.success(f"candidate_df 업로드 완료: {len(candidate_df):,}행")
+
+    with col_auto2:
+        if video_df is not None:
+            st.success(f"YouTube raw 데이터 자동 불러오기 완료: {len(video_df):,}행")
+        else:
+            st.warning("자동으로 불러올 YouTube raw 데이터가 없습니다. CSV를 직접 업로드하세요.")
+            raw_file = st.file_uploader("YouTube raw CSV 업로드", type=["csv"], key="raw_manual")
+            if raw_file is not None:
+                video_df = pd.read_csv(raw_file)
+                st.session_state.video_df = video_df
+                st.success(f"YouTube raw 업로드 완료: {len(video_df):,}행")
+
+    st.divider()
+
+    # --------------------------------------------------
+    # 2) Gemini 옵션 + 수작업 딕셔너리 선택 업로드
+    # --------------------------------------------------
+    st.subheader("1. Gemini 딕셔너리 생성 옵션")
+    c1, c2 = st.columns(2)
+    min_count = c1.number_input("Gemini 분류 최소 빈도", 1, 100, 5)
+    max_keywords = c2.slider("Gemini 분류 키워드 수", 50, 1000, 300, 50)
+
+    manual_dict_file = st.file_uploader(
+        "추가 수작업 딕셔너리 업로드 선택사항 CSV 또는 JSON",
+        type=["csv", "json"],
+        key="manual_dict_upload"
+    )
+
+    def load_manual_dictionary(uploaded_file):
+        if uploaded_file is None:
+            return pd.DataFrame(columns=["category", "brand", "product_group", "item_name", "aliases"])
+        try:
+            if uploaded_file.name.endswith(".csv"):
+                df_manual = pd.read_csv(uploaded_file)
+            else:
+                data = json.loads(uploaded_file.getvalue().decode("utf-8"))
+                df_manual = pd.DataFrame(data)
+            for col in ["category", "brand", "product_group", "item_name", "aliases"]:
+                if col not in df_manual.columns:
+                    df_manual[col] = ""
+            df_manual["aliases"] = df_manual["aliases"].apply(ensure_alias_list)
+            return df_manual[["category", "brand", "product_group", "item_name", "aliases"]]
+        except Exception as e:
+            st.error(f"수작업 딕셔너리 파일을 읽는 중 오류가 발생했습니다: {e}")
+            return pd.DataFrame(columns=["category", "brand", "product_group", "item_name", "aliases"])
+
+    manual_dict_df = load_manual_dictionary(manual_dict_file)
+    if manual_dict_file is not None:
+        st.info(f"수작업 딕셔너리 {len(manual_dict_df):,}개가 추가 대상으로 로드되었습니다.")
+
+    if candidate_df is not None:
+        st.subheader("2. candidate_df 미리보기")
         st.dataframe(candidate_df.head(100), use_container_width=True)
+
         if st.button("Gemini로 딕셔너리 생성", type="primary"):
-            if not gemini_key: st.error("Gemini API Key를 입력하세요.")
+            if not gemini_key:
+                st.error("Gemini API Key를 입력하세요.")
             else:
                 try:
-                    kws = candidate_df[candidate_df["count"]>=min_count].sort_values("count", ascending=False).head(max_keywords)["keyword"].astype(str).tolist()
+                    kws = (
+                        candidate_df[candidate_df["count"] >= min_count]
+                        .sort_values("count", ascending=False)
+                        .head(max_keywords)["keyword"]
+                        .astype(str)
+                        .tolist()
+                    )
                     dictionary_df = pd.DataFrame(classify_keywords_with_gemini(gemini_key, kws))
-                    for col in ["category","brand","product_group","item_name","aliases"]:
-                        if col not in dictionary_df.columns: dictionary_df[col] = ""
+                    for col in ["category", "brand", "product_group", "item_name", "aliases"]:
+                        if col not in dictionary_df.columns:
+                            dictionary_df[col] = ""
                     dictionary_df["aliases"] = dictionary_df["aliases"].apply(ensure_alias_list)
-                    dictionary_df = dictionary_df.drop_duplicates(subset=["category","brand","product_group","item_name"])
+                    dictionary_df = dictionary_df.drop_duplicates(subset=["category", "brand", "product_group", "item_name"])
+
+                    # 수작업 딕셔너리는 선택적으로만 결합
+                    final_dictionary_df = pd.concat([dictionary_df, manual_dict_df], ignore_index=True)
+                    final_dictionary_df = final_dictionary_df.drop_duplicates(
+                        subset=["category", "brand", "product_group", "item_name"]
+                    )
+
                     st.session_state.dictionary_df = dictionary_df
-                    st.success(f"딕셔너리 생성 완료: {len(dictionary_df):,}개")
+                    st.session_state.final_dictionary_df = final_dictionary_df
+                    st.success(f"Gemini 딕셔너리 생성 완료: {len(dictionary_df):,}개")
+                    if len(manual_dict_df) > 0:
+                        st.success(f"수작업 딕셔너리 포함 최종 딕셔너리: {len(final_dictionary_df):,}개")
                 except Exception as e:
                     st.error(f"Gemini 오류: {e}")
-    if "dictionary_df" in st.session_state:
-        ddf = st.session_state.dictionary_df
-        st.subheader("Gemini 생성 딕셔너리")
+    else:
+        st.info("candidate_df가 있어야 Gemini 딕셔너리를 만들 수 있습니다. 1페이지에서 크롤링하거나 CSV를 업로드하세요.")
+
+    # --------------------------------------------------
+    # 3) 딕셔너리 확인 및 product_rank 생성
+    # --------------------------------------------------
+    if "final_dictionary_df" in st.session_state:
+        st.divider()
+        st.subheader("3. 최종 딕셔너리")
+        ddf = st.session_state.final_dictionary_df
         st.dataframe(ddf, use_container_width=True)
-        st.download_button("Gemini 딕셔너리 다운로드", to_csv_bytes(ddf), "YT_gemini_dictionary.csv", "text/csv")
-        if raw_file and st.button("딕셔너리 기반 product_rank 생성", type="primary"):
-            video_df = pd.read_csv(raw_file)
-            st.session_state.mention_df, st.session_state.product_rank = build_product_rank(video_df, ddf)
-        if "product_rank" in st.session_state:
-            pr = st.session_state.product_rank
-            st.subheader("인기 상품 랭킹")
-            st.dataframe(pr, use_container_width=True)
-            if not pr.empty:
-                fig = px.bar(pr.head(30), x="sns_score", y="brand", color="category", orientation="h", title="SNS 점수 기준 TOP30")
-                fig.update_layout(yaxis={"autorange":"reversed"}); st.plotly_chart(fig, use_container_width=True)
+        st.download_button("최종 딕셔너리 다운로드", to_csv_bytes(ddf), "YT_gemini_dictionary_final.csv", "text/csv")
+
+        if video_df is not None:
+            if st.button("딕셔너리 기반 product_rank 생성", type="primary"):
+                mention_df, product_rank = build_product_rank(video_df, ddf)
+                st.session_state.mention_df = mention_df
+                st.session_state.product_rank = product_rank
+                st.session_state.product_rank_df = product_rank
+                st.success("product_rank가 생성되었습니다. 3페이지 네이버 쇼핑 최저가 비교에서 자동으로 사용할 수 있습니다.")
+        else:
+            st.warning("product_rank를 만들려면 YouTube raw 데이터가 필요합니다. 1페이지에서 크롤링하거나 raw CSV를 업로드하세요.")
+
+    if "product_rank" in st.session_state:
+        pr = st.session_state.product_rank
+        st.subheader("인기 상품 랭킹")
+        st.dataframe(pr, use_container_width=True)
+        if not pr.empty:
+            fig = px.bar(
+                pr.head(30),
+                x="sns_score",
+                y="brand",
+                color="category",
+                orientation="h",
+                title="SNS 점수 기준 TOP30"
+            )
+            fig.update_layout(yaxis={"autorange": "reversed"})
+            st.plotly_chart(fig, use_container_width=True)
+        if "mention_df" in st.session_state:
             st.download_button("mention_df 다운로드", to_csv_bytes(st.session_state.mention_df), "YT_mention_df_gemini.csv", "text/csv")
-            st.download_button("product_rank 다운로드", to_csv_bytes(pr), "YT_product_rank_gemini.csv", "text/csv")
+        st.download_button("product_rank 다운로드", to_csv_bytes(pr), "YT_product_rank_gemini.csv", "text/csv")
 
 elif page == "3. 네이버 쇼핑 최저가 비교":
     st.title("🛒 네이버 쇼핑 최저가 비교")
-    rank_file = st.file_uploader("YT_product_rank_gemini.csv 업로드", type=["csv"], key="rank")
-    c1,c2,c3 = st.columns(3)
-    top_n = c1.slider("랭킹 상위 N개 검색", 10, 300, 100, 10)
-    display_n = c2.slider("검색어별 상품 수", 10, 100, 50, 10)
-    sort = {"정확도순":"sim","최저가순":"asc","최고가순":"dsc","날짜순":"date"}[c3.selectbox("네이버 정렬", ["정확도순","최저가순","최고가순","날짜순"])]
-    if rank_file:
-        product_rank = pd.read_csv(rank_file)
+    st.caption("2페이지에서 생성한 product_rank를 자동으로 불러옵니다. 필요할 때만 CSV를 직접 업로드하세요.")
+
+    product_rank = st.session_state.get("product_rank", None)
+    if product_rank is None:
+        product_rank = st.session_state.get("product_rank_df", None)
+
+    if product_rank is not None:
+        st.success(f"Gemini 랭킹 페이지에서 생성된 product_rank를 자동으로 불러왔습니다: {len(product_rank):,}행")
+    else:
+        st.warning("자동으로 불러올 product_rank가 없습니다. CSV를 직접 업로드하세요.")
+        rank_file = st.file_uploader("product_rank CSV 업로드", type=["csv"], key="rank_manual")
+        if rank_file is not None:
+            product_rank = pd.read_csv(rank_file)
+            st.session_state.product_rank = product_rank
+            st.success(f"product_rank 업로드 완료: {len(product_rank):,}행")
+
+    if product_rank is not None:
+        c1, c2, c3 = st.columns(3)
+        top_n = c1.slider("랭킹 상위 N개 검색", 10, 300, 100, 10)
+        display_n = c2.slider("검색어별 상품 수", 10, 100, 50, 10)
+        sort = {"정확도순":"sim", "최저가순":"asc", "최고가순":"dsc", "날짜순":"date"}[c3.selectbox("네이버 정렬", ["정확도순", "최저가순", "최고가순", "날짜순"])]
+
         target = product_rank.sort_values("sns_rank").head(top_n).copy()
         target["search_keyword"] = target.apply(make_search_keyword, axis=1)
-        target = target[target["search_keyword"].str.strip()!=""].drop_duplicates("search_keyword")
-        st.info(f"최종 검색어 수 {len(target):,}개 / 예상 상품 수 최대 {len(target)*display_n:,}개")
-        st.dataframe(target[["sns_rank","category","brand","product_group","item_name","search_keyword"]], use_container_width=True)
+        target = target[target["search_keyword"].astype(str).str.strip() != ""].drop_duplicates("search_keyword")
+
+        st.info(f"최종 검색어 수 {len(target):,}개 / 예상 상품 수 최대 {len(target) * display_n:,}개")
+        st.dataframe(target[["sns_rank", "category", "brand", "product_group", "item_name", "search_keyword"]], use_container_width=True)
+
         if st.button("네이버 쇼핑 수집 실행", type="primary"):
-            if not naver_id or not naver_secret: st.error("Naver Client ID / Secret을 입력하세요.")
+            if not naver_id or not naver_secret:
+                st.error("Naver Client ID / Secret을 입력하세요.")
             else:
-                dfs = []; prog = st.progress(0)
+                dfs = []
+                prog = st.progress(0)
                 for i, (_, row) in enumerate(target.iterrows()):
                     try:
                         temp = get_naver_shopping(naver_id, naver_secret, row["search_keyword"], display_n, sort)
                         if not temp.empty:
-                            for src, dst in [("sns_rank","sns_rank"),("mention_rank","mention_rank"),("view_rank","view_rank")]:
+                            for src, dst in [("sns_rank", "sns_rank"), ("mention_rank", "mention_rank"), ("view_rank", "view_rank")]:
                                 temp[dst] = row.get(src, "")
-                            temp["yt_category"] = row.get("category","")
-                            temp["yt_brand"] = row.get("brand","")
-                            temp["yt_product_group"] = row.get("product_group","")
-                            temp["yt_item_name"] = row.get("item_name","")
-                            temp["yt_mention_count"] = row.get("mention_count","")
-                            temp["yt_video_count"] = row.get("video_count","")
-                            temp["yt_total_view_count"] = row.get("total_view_count","")
-                            temp["yt_sns_score"] = row.get("sns_score","")
+                            temp["yt_category"] = row.get("category", "")
+                            temp["yt_brand"] = row.get("brand", "")
+                            temp["yt_product_group"] = row.get("product_group", "")
+                            temp["yt_item_name"] = row.get("item_name", "")
+                            temp["yt_mention_count"] = row.get("mention_count", "")
+                            temp["yt_video_count"] = row.get("video_count", "")
+                            temp["yt_total_view_count"] = row.get("total_view_count", "")
+                            temp["yt_sns_score"] = row.get("sns_score", "")
                             dfs.append(temp)
                     except Exception as e:
                         st.warning(f"{row['search_keyword']} 실패: {e}")
-                    prog.progress((i+1)/len(target)); time.sleep(0.15)
+                    prog.progress((i + 1) / len(target))
+                    time.sleep(0.15)
+
                 if dfs:
                     naver_df = pd.concat(dfs, ignore_index=True)
-                    naver_df = naver_df[naver_df["lowest_price"]>0].drop_duplicates(subset=["search_keyword","product_id"])
-                    naver_lowest = naver_df.sort_values(["search_keyword","lowest_price"]).groupby("search_keyword").head(10).reset_index(drop=True)
-                    naver_summary = naver_df.groupby(["sns_rank","yt_category","yt_brand","yt_product_group","yt_item_name","search_keyword"], dropna=False).agg(
-                        naver_product_count=("product_id","nunique"), min_price=("lowest_price","min"),
-                        avg_price=("lowest_price","mean"), median_price=("lowest_price","median"),
-                        max_price=("lowest_price","max"), mall_count=("mall_name","nunique"),
-                        yt_mention_count=("yt_mention_count","first"), yt_video_count=("yt_video_count","first"),
-                        yt_total_view_count=("yt_total_view_count","first"), yt_sns_score=("yt_sns_score","first")
+                    naver_df = naver_df[naver_df["lowest_price"] > 0].drop_duplicates(subset=["search_keyword", "product_id"])
+                    naver_lowest = naver_df.sort_values(["search_keyword", "lowest_price"]).groupby("search_keyword").head(10).reset_index(drop=True)
+                    naver_summary = naver_df.groupby(
+                        ["sns_rank", "yt_category", "yt_brand", "yt_product_group", "yt_item_name", "search_keyword"],
+                        dropna=False
+                    ).agg(
+                        naver_product_count=("product_id", "nunique"),
+                        min_price=("lowest_price", "min"),
+                        avg_price=("lowest_price", "mean"),
+                        median_price=("lowest_price", "median"),
+                        max_price=("lowest_price", "max"),
+                        mall_count=("mall_name", "nunique"),
+                        yt_mention_count=("yt_mention_count", "first"),
+                        yt_video_count=("yt_video_count", "first"),
+                        yt_total_view_count=("yt_total_view_count", "first"),
+                        yt_sns_score=("yt_sns_score", "first")
                     ).reset_index().sort_values("sns_rank")
+
                     st.session_state.naver_df = naver_df
                     st.session_state.naver_lowest = naver_lowest
                     st.session_state.naver_summary = naver_summary
+                    st.success("네이버 쇼핑 수집이 완료되었습니다.")
+
     if "naver_summary" in st.session_state:
         st.subheader("네이버 쇼핑 요약")
         st.dataframe(st.session_state.naver_summary, use_container_width=True)
-        fig = px.scatter(st.session_state.naver_summary, x="yt_sns_score", y="min_price", size="naver_product_count", color="yt_category", hover_name="search_keyword", title="YouTube 인기 점수 vs 네이버 최저가")
+        fig = px.scatter(
+            st.session_state.naver_summary,
+            x="yt_sns_score",
+            y="min_price",
+            size="naver_product_count",
+            color="yt_category",
+            hover_name="search_keyword",
+            title="YouTube 인기 점수 vs 네이버 최저가"
+        )
         st.plotly_chart(fig, use_container_width=True)
         st.download_button("raw 전체 다운로드", to_csv_bytes(st.session_state.naver_df), "naver_shopping_raw_from_yt_rank.csv", "text/csv")
         st.download_button("최저가 TOP10 다운로드", to_csv_bytes(st.session_state.naver_lowest), "naver_shopping_lowest_top10_from_yt_rank.csv", "text/csv")
         st.download_button("요약표 다운로드", to_csv_bytes(st.session_state.naver_summary), "naver_shopping_summary_from_yt_rank.csv", "text/csv")
+
