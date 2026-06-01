@@ -1,0 +1,7 @@
+streamlit
+pandas
+requests
+plotly
+google-api-python-client
+youtube-transcript-api
+google-generativeai
